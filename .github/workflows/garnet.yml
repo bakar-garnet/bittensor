@@ -2,18 +2,131 @@ name: Garnet CI Monitoring
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ "main", "master" ]
   pull_request:
-    branches: [ main, master ]
+    branches: [ "main", "master" ]
   workflow_dispatch: {}
 
 jobs:
-  monitor:
+  node_build_test:
+    name: Node install + test (lots of OSS + scripts)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
+      # ✅ Garnet (minimal config only)
       - name: Add Garnet Monitor
         uses: garnet-org/action@v1
         with:
           api_token: ${{ secrets.GARNET_API_TOKEN }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Show environment
+        run: |
+          node -v
+          npm -v
+          uname -a
+          env | sort | head -n 50
+
+      - name: Install deps (creates lots of process + network activity)
+        run: |
+          npm init -y
+          npm pkg set type=module
+          npm i axios ethers web3 lodash dayjs uuid ws dotenv zod express pino yargs chokidar
+          npm i -D typescript ts-node vitest eslint prettier
+
+      - name: Run a small script (DNS + HTTPS + sockets)
+        run: |
+          cat > canary.mjs << 'EOF'
+          import dns from "node:dns/promises";
+          import https from "node:https";
+          import net from "node:net";
+
+          console.log("DNS lookup registry.npmjs.org...");
+          console.log(await dns.lookup("registry.npmjs.org"));
+
+          console.log("HTTPS GET https://registry.npmjs.org/-/ping");
+          await new Promise((resolve, reject) => {
+            https.get("https://registry.npmjs.org/-/ping", (res) => {
+              console.log("status:", res.statusCode);
+              res.resume();
+              res.on("end", resolve);
+            }).on("error", reject);
+          });
+
+          console.log("Raw TCP connect to example.com:443 (no data)");
+          await new Promise((resolve) => {
+            const s = net.createConnection({ host: "example.com", port: 443 }, () => {
+              console.log("connected");
+              s.end();
+            });
+            s.on("close", resolve);
+          });
+
+          console.log("done");
+          EOF
+          node canary.mjs
+
+      - name: Run tests (even empty) + lint formatting commands
+        run: |
+          npx tsc --init --pretty false
+          npx eslint --version
+          npx prettier --version
+          echo "ok"
+
+  python_build:
+    name: Python pip install + basic crypto libs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ✅ Garnet (minimal config only)
+      - name: Add Garnet Monitor
+        uses: garnet-org/action@v1
+        with:
+          api_token: ${{ secrets.GARNET_API_TOKEN }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps (network + subprocess)
+        run: |
+          python -V
+          python -m pip install --upgrade pip
+          pip install requests cryptography pynacl pyjwt web3 eth-account coincurve mnemonic bip-utils
+
+      - name: Run a small script (HTTPS request)
+        run: |
+          python - << 'PY'
+          import requests, socket
+          print("GET https://pypi.org/simple/")
+          r = requests.get("https://pypi.org/simple/", timeout=20)
+          print("status:", r.status_code, "len:", len(r.text))
+          print("DNS lookup pypi.org:", socket.gethostbyname("pypi.org"))
+          PY
+
+  network_canary:
+    name: Curl + git + package registries (high-signal, benign)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ✅ Garnet (minimal config only)
+      - name: Add Garnet Monitor
+        uses: garnet-org/action@v1
+        with:
+          api_token: ${{ secrets.GARNET_API_TOKEN }}
+
+      - name: Network + process canary
+        run: |
+          set -euxo pipefail
+          curl -I https://registry.npmjs.org/
+          curl -I https://pypi.org/
+          curl -I https://github.com/
+          git --version
+          git ls-remote https://github.com/nodejs/node.git HEAD | head -n 1
+          echo "done"
